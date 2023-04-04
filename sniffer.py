@@ -1,17 +1,26 @@
 from scapy.all import AsyncSniffer, get_windows_if_list
 import tkinter as tk
+import tkinter.ttk as ttk
 
 
 class MySniffer():
     def __init__(self) -> None:
         self.filter = None
         self.iface = []
-        self.packet_data = ['123']
+        self.packet_summary = []
+        self.packet_detail = []
         self.interfaces = None
         self.asy_sniffer = None
         self.config = {
             'interface': '以太网',
             'filter': ''
+        }
+        self.port2protocol = {
+            '443': 'HTTPS',
+            '1900': 'SSDP',
+            '80': 'HTTP',
+            '3702': 'WS-Discovery',
+            '2869': 'ICSLAP'
         }
 
     # 获取接口信息
@@ -29,11 +38,26 @@ class MySniffer():
 
     # 数据包处理
     def call_back(self, packet):
-        self.packet_data.append(packet.summary())
-        print(packet.summary())
+        # print(dir(packet))
+        # print(packet.src, packet.dst)
+        packet_detail_dict = {}
+        packet_detail_dict['layers'] = [layer().name for layer in packet.layers()]
+        temp_summary = packet.summary()
         for layer in packet.layers():
-            print(layer().name)
-            print(packet[layer().name].fields)
+            # print(layer().name)
+            # print(packet[layer().name].fields)
+            packet_detail_dict[layer().name] = packet[layer().name].fields
+        # 分析应用层协议
+        if 'Raw' in packet_detail_dict['layers']:
+            if 'UDP' in packet_detail_dict['layers'] or 'TCP' in packet_detail_dict['layers']:
+                transmission_protocol = 'UDP' if 'UDP' in packet_detail_dict['layers'] else 'TCP'
+                for port in self.port2protocol:
+                    if packet_detail_dict[transmission_protocol]['sport'] == int(port) or packet_detail_dict[transmission_protocol]['dport'] == int(port):
+                        temp_summary = temp_summary.replace('Raw', self.port2protocol[port])
+                        packet_detail_dict['layers'][packet_detail_dict['layers'].index('Raw')] = self.port2protocol[port]
+                        packet_detail_dict[self.port2protocol[port]] = packet_detail_dict['Raw']
+        self.packet_summary.append(f'{len(self.packet_summary)} {temp_summary}')
+        self.packet_detail.append(packet_detail_dict)
 
 
 class SnifferGui(tk.Frame):
@@ -41,16 +65,17 @@ class SnifferGui(tk.Frame):
         super().__init__(root)
         self.root = root
         self.sniffer = sniffer
-        self.packet_data = tk.StringVar(value=self.sniffer.packet_data)
+        self.packet_data = tk.StringVar(value=self.sniffer.packet_summary)
+        self.capture_flag = False
 
         self.select_if_button = tk.Button(self.root, text='选择网卡', command=self.create_if_frame)
         self.config_filter_button = tk.Button(self.root, text='设置过滤器', command=self.create_filter_frame)
         self.start_capture_button = tk.Button(self.root, text='开始捕获', command=self.start_capture)
         self.stop_capture_button = tk.Button(self.root, text='停止捕获', command=self.stop_capture)
         self.listbox_scrollbar = tk.Scrollbar(self.root)
-        self.packet_listbox = tk.Listbox(self.root, listvariable=self.packet_data, width=100, height=50, yscrollcommand=self.listbox_scrollbar.set)
+        self.packet_listbox = tk.Listbox(self.root, listvariable=self.packet_data, width=100, height=25, yscrollcommand=self.listbox_scrollbar.set)
         self.listbox_scrollbar.config(command=self.packet_listbox.yview)
-        # self.packet_listbox.bind('<<ListboxSelect>>', func=)
+        self.packet_listbox.bind('<<ListboxSelect>>', func=self.create_packet_detail_frame)
 
         # 定时更新listbox
         self.packet_listbox.after(1000, func=self.packet_data_update)
@@ -64,9 +89,10 @@ class SnifferGui(tk.Frame):
         self.listbox_scrollbar.grid(row=1, column=4, sticky='ns')
 
     def packet_data_update(self):
-        self.packet_data.set(self.sniffer.packet_data)
+        if self.capture_flag is True:
+            self.packet_data.set(self.sniffer.packet_summary)
+            self.packet_listbox.see(tk.END)
         self.root.after(1000, func=self.packet_data_update)
-        self.packet_listbox.see(tk.END)
 
     # 绘制 选择网卡 窗口
     def create_if_frame(self):
@@ -94,21 +120,44 @@ class SnifferGui(tk.Frame):
         filter_entry.pack()
 
         def filter_button_callback():
-            print(filter_entry.get())
+            # print(filter_entry.get())
             self.sniffer.config['filter'] = filter_entry.get()
             config_filter_frame.destroy()
         tk.Button(config_filter_frame, text='确定', command=filter_button_callback).pack()
 
+    # 绘制 数据包详细信息 窗口
+    def create_packet_detail_frame(self, event):
+        # 获取数据包序号
+        w = event.widget
+        index = int(w.curselection()[0])
+        # print(index)
+        # print(self.sniffer.packet_summary[index])
+        # print(self.sniffer.packet_detail[index])
+
+        # 绘制控件
+        packet_detail_frame = tk.Toplevel(self.root)
+        packet_detail_notebook = ttk.Notebook(packet_detail_frame)
+        packet_detail_notebook.pack(fill=tk.BOTH, expand=True)
+        for layer in self.sniffer.packet_detail[index]['layers']:
+            frame = tk.Frame(packet_detail_frame)
+            packet_detail_notebook.add(frame, text=layer)
+            for item in self.sniffer.packet_detail[index][layer]:
+                tk.Label(frame, text=f'{item}: {self.sniffer.packet_detail[index][layer][item]}', wraplength=500).pack(anchor='w')
+
     # 开始捕获数据包
     def start_capture(self):
-        self.sniffer.start_sniff()
+        if self.capture_flag is False:
+            self.capture_flag = True
+            self.sniffer.start_sniff()
 
     # 停止捕获数据包
     def stop_capture(self):
-        self.sniffer.stop_sniff()
+        if self.capture_flag is True:
+            self.capture_flag = False
+            self.sniffer.stop_sniff()
 
 
-def test():
+def main():
     sniffer = MySniffer()
     root = tk.Tk()
     root.title('Sniffer')
@@ -117,4 +166,4 @@ def test():
 
 
 if __name__ == '__main__':
-    test()
+    main()
